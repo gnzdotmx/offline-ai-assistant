@@ -1,0 +1,273 @@
+# Offline AI Assistant - Git Ignore File
+
+# ===================================
+# USER DATA & RUNTIME FILES
+# ===================================
+
+# NOTE: User data is stored in ~/.config/ai-offline-assistant/
+# Local directories are kept for development/testing purposes
+
+# Vector database and indices
+db/
+!db/.gitkeep
+
+# Uploaded documents
+docs/
+!docs/.gitkeep
+!docs/README.md
+
+# Application logs
+logs/
+!logs/.gitkeep
+
+# Downloaded AI models
+models/
+!models/.gitkeep
+!models/README.md
+
+# ===================================
+# PYTHON & DEVELOPMENT
+# ===================================
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+.env
+.venv
+
+# PyInstaller
+*.manifest
+*.spec
+installer/
+
+# ===================================
+# IDE & EDITOR FILES
+# ===================================
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# ===================================
+# OPERATING SYSTEM FILES
+# ===================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ===================================
+# TESTING & COVERAGE
+# ===================================
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# ===================================
+# JUPYTER NOTEBOOKS
+# ===================================
+
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# ===================================
+# TEMPORARY & BACKUP FILES
+# ===================================
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+*.rej
+
+# Log files
+*.log
+*.out
+
+# ===================================
+# CONFIGURATION & SECRETS
+# ===================================
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Configuration files with sensitive data
+config.local.py
+settings.local.py
+secrets.py
+
+# ===================================
+# PACKAGE MANAGERS
+# ===================================
+
+# pip
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Poetry
+poetry.lock
+
+# Pipenv
+Pipfile.lock
+
+# ===================================
+# DOCUMENTATION BUILD
+# ===================================
+
+# Sphinx documentation
+docs/_build/
+.readthedocs.yml
+
+# MkDocs
+site/
+
+# ===================================
+# CUSTOM PROJECT EXCLUSIONS
+# ===================================
+
+# User-specific model configurations
+user_config.py
+local_settings.py
+
+# Development and testing files
+test_documents/
+dev_notes.md
+TODO.txt
+
+# Performance profiling
+*.prof
+*.pstats
+
+# Debugging files
+debug.log
+trace.log
+
+# Backup databases
+*.db.backup
+*.sqlite.backup
+
+# Temporary model downloads
+*.downloading
+*.partial
+
+# ===================================
+# KEEP THESE FILES
+# ===================================
+
+# Keep directory structure with .gitkeep files
+!.gitkeep
+
+# Keep important documentation
+!README.md
+!SETUP.md
+!TECHNICAL_DESIGN.md
+!requirements.txt
+!LICENSE
+!CONTRIBUTING.md
+
+# Keep example configurations
+!config.example.py
+!settings.example.py
+
+# Keep source code
+!offline_ai_assistant/
+!offline_ai_assistant/*.py
