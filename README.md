@@ -38,14 +38,43 @@ A fully offline desktop AI assistant that provides document analysis and questio
 
 ## Installation
 
-### 1. Clone the Repository
+### Option A: Using Make (recommended)
+
+From the project root:
+
+```bash
+# Clone (first time only)
+git clone https://github.com/gnzdotmx/offline-ai-assistant.git
+cd offline-ai-assistant
+
+# Create virtualenv and install dependencies
+make install
+
+# Run the application
+make run
+```
+
+To use an **existing models folder** (e.g. shared with other projects) instead of the default `~/.config/ai-offline-assistant/models`:
+
+```bash
+make run MODELS_DIR=/path/to/your/models
+# or set once:
+export OFFLINE_AI_MODELS_DIR=/path/to/your/models
+make run
+```
+
+Other targets: `make help` (list targets), `make venv` (only create venv), `make clean` (remove venv and cache).
+
+### Option B: Manual setup
+
+#### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/gnzdotmx/offline-ai-assistant.git
 cd offline-ai-assistant
 ```
 
-### 2. Create Virtual Environment
+#### 2. Create Virtual Environment
 
 ```bash
 python -m venv venv
@@ -57,13 +86,13 @@ venv\\Scripts\\activate
 source venv/bin/activate
 ```
 
-### 3. Install Dependencies
+#### 3. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. Run the Application
+#### 4. Run the Application
 
 ```bash
 python -m offline_ai_assistant.app_ui
@@ -132,12 +161,13 @@ Access via Edit → Settings:
 - **Top-P**: Nucleus sampling parameter (default: 0.9)
 - **GPU Layers**: Number of layers on GPU (default: 0 for CPU-only)
 
-**Configuration Persistence:**
-- Settings are automatically saved when you click "Save"
-- Configuration is stored in `~/.config/ai-offline-assistant/config.json`
-- Settings are loaded automatically when the application starts
+**Embedding model:** The default is `all-MiniLM-L6-v2` (fast, 384 dims). You can switch to a stronger model (e.g. `all-mpnet-base-v2`) in Edit → Settings for better retrieval on harder queries. Changing the embedding model requires re-processing documents: the app will warn if the index was built with a different model and can clear the index so you can re-upload.
+
+**Configuration persistence:**
+- Settings are saved when you click "Save"
+- Stored in `~/.config/ai-offline-assistant/config.json`
+- Loaded automatically on startup
 - Use "Reset to Defaults" to restore factory settings
-- See [Configuration Guide](docs/CONFIGURATION.md) for detailed information
 
 ### File Locations
 
@@ -188,25 +218,57 @@ The application supports any GGUF-format model. To use a custom model not in the
 2. **Place it in `~/.config/ai-offline-assistant/models/`**
 3. **Update the model path in Settings** (Edit → Settings → Browse)
 
+### Retrieval re-ranking (optional)
+
+For better answer relevance, you can enable a second-stage re-ranking of search results:
+
+- **Off by default**: No extra dependencies or latency.
+- **When enabled**: The app retrieves more candidates (e.g. 3× your Top-K), re-ranks them by keyword overlap with the query, then keeps the top-K for the prompt. This can surface more relevant chunks than vector similarity alone.
+
+**Config (in `config.json` or via settings if exposed in UI):**
+
+- **`rag_rerank`** (boolean, default: `false`) – Set to `true` to enable re-ranking.
+- **`rag_rerank_candidate_multiplier`** (integer, 2–5, default: `3`) – Retrieve `top_k × multiplier` candidates, then re-rank down to `top_k`.
+
+**Dependencies:** The built-in re-ranker uses only the standard library (keyword/overlap scoring). No extra packages (e.g. cross-encoders) are required. For even better relevance you could add an optional cross-encoder (e.g. `sentence-transformers` cross-encoder) in the future; that would be an extra dependency.
+
 ### Environment Variables
 
 You can override default settings with environment variables:
 
-```bash
-export OFFLINE_AI_MODEL_PATH="/path/to/your/model.gguf"
-export OFFLINE_AI_CHUNK_SIZE=1024
-export OFFLINE_AI_GPU_LAYERS=20
-```
+- **`OFFLINE_AI_MODELS_DIR`** – Custom folder for LLM and embedding models. Use this if you already keep GGUF models (and optionally sentence-transformers cache) in another project or shared location. Default: `~/.config/ai-offline-assistant/models`. Example: `export OFFLINE_AI_MODELS_DIR=/shared/ai-models`
+- **`OFFLINE_AI_MODEL_PATH`** – Path to a specific GGUF model file (overrides path in settings when supported).
+- **`OFFLINE_AI_CHUNK_SIZE`** – Override chunk size (e.g. 1024).
+- **`OFFLINE_AI_GPU_LAYERS`** – Override GPU layers (e.g. 20).
+- **`OFFLINE_AI_EMBEDDING_BATCH_SIZE`** – Chunk batch size when embedding documents (1–512). Default: 32. Use a **smaller value** (e.g. 8 or 16) on low-memory machines to reduce RAM use; use a **larger value** for faster processing of large documents.
+- **`OFFLINE_AI_EMBEDDING_SHOW_PROGRESS`** – Set to `0`, `false`, or `no` to disable the progress bar during document embedding (e.g. when running headless or in a script). Default: progress bar shown.
 
 ## Architecture
 
 - **Language**: Python 3.10+
-- **LLM Runtime**: llama-cpp-python with GGUF models
-- **Embeddings**: sentence-transformers (all-MiniLM-L6-v2)
-- **Vector Search**: FAISS + SQLite metadata storage
-- **Document Parsing**: PyMuPDF (PDF) + python-docx (DOCX)
-- **Text Chunking**: Token-aware chunking with tiktoken
+- **Package layout**: `config/` (validation, paths, loading), `core/` (models, interfaces, RAG pipeline, rerank), `data/` (extractor, chunker, embedder, vector store, model manager), `llm/` (local LLM). Root modules (`rag`, `chunker`, `embedder`, etc.) are compatibility shims re-exporting from these packages.
+- **LLM**: llama-cpp-python with GGUF models
+- **Embeddings**: sentence-transformers (default all-MiniLM-L6-v2)
+- **Vector search**: FAISS + SQLite metadata; optional per-document cap and document-order context
+- **Re-ranking**: Optional keyword-overlap re-ranking (off by default; no extra deps)
+- **Document parsing**: PyMuPDF (PDF) + python-docx (DOCX)
+- **Chunking**: Token-aware with tiktoken (word-based fallback when tiktoken unavailable)
 - **GUI**: PySide6 (Qt for Python)
+
+## Testing
+
+From the project root (with dependencies installed):
+
+```bash
+# Run all tests
+pytest offline_ai_assistant/ -v
+
+# With coverage report
+pytest offline_ai_assistant/ --cov=offline_ai_assistant --cov-report=term-missing
+```
+
+- **Unit tests** cover core RAG logic, config validation, data layer (chunker, embedder, extractor, vector store, model manager), and LLM layer with mocks. Root shim modules have small compatibility tests.
+- **GUI tests** (`app_ui_test.py`) are skipped by default to avoid Qt/display in CI. Set `OFFLINE_AI_RUN_GUI_TESTS=1` to run worker and widget tests when PySide6 and a display (or offscreen) are available.
 
 ## Troubleshooting
 
@@ -231,6 +293,7 @@ export OFFLINE_AI_GPU_LAYERS=20
 - Use a smaller model
 - Reduce context length in settings
 - Close other applications
+- **When embedding documents:** set `OFFLINE_AI_EMBEDDING_BATCH_SIZE=8` (or add `"embedding_batch_size": 8` to `config.json`) to use less RAM during indexing.
 
 ### Log Files
 
@@ -245,7 +308,9 @@ Check the log files for detailed error information:
 3. **Use quantized models** (Q4_K_M, Q5_K_M) for speed
 4. **Adjust chunk size** based on your documents
 5. **Enable GPU** if you have compatible hardware
+6. **Prompt processing speed:** On capable hardware, increasing **prompt batch size** (Settings → Advanced) can speed up handling of long prompts; higher values use more memory. Default is 512; try 1024 or 2048 if you have spare VRAM/RAM.
 
 ## Technical Design
-- Read the [Technical Design](TECHNICAL_DESIGN.md) document for more details.
+
+See [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md) for component descriptions, project structure, data flow, and tool choices.
 

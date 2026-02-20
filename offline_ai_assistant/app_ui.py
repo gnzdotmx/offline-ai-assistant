@@ -5,6 +5,7 @@ This module provides a cross-platform desktop interface with document upload,
 search, and AI-powered response generation capabilities.
 """
 
+import html
 import sys
 import logging
 from pathlib import Path
@@ -32,9 +33,9 @@ except ImportError:
     sys.exit(1)
 
 from .config import Config, setup_logging
-from .rag import RAGPipeline, create_rag_pipeline, ProcessingResult, RAGResult
-from .llm import GenerationConfig
-from .model_manager import ModelManager, ModelInfo
+from .core import RAGPipeline, create_rag_pipeline, ProcessingResult, RAGResult
+from .core.models import GenerationConfig
+from .data import ModelManager, ModelInfo
 
 logger = logging.getLogger("OfflineAIAssistant.gui")
 
@@ -136,10 +137,8 @@ class SettingsDialog(QDialog):
     def setup_ui(self):
         """Setup the settings UI."""
         layout = QVBoxLayout(self)
-        
-        # Create form layout
         form_layout = QFormLayout()
-        
+
         # Chunking settings
         chunk_group = QGroupBox("Text Chunking")
         chunk_layout = QFormLayout(chunk_group)
@@ -159,9 +158,28 @@ class SettingsDialog(QDialog):
         retrieval_layout = QFormLayout(retrieval_group)
         
         self.top_k_spin = QSpinBox()
-        self.top_k_spin.setRange(1, 20)
+        self.top_k_spin.setRange(1, 50)
         self.top_k_spin.setValue(Config.TOP_K_RETRIEVAL)
+        self.top_k_spin.setToolTip("Number of chunks to retrieve (1–50). More for complex questions, fewer for simple ones.")
         retrieval_layout.addRow("Top-K Results:", self.top_k_spin)
+        
+        self.min_score_spin = QDoubleSpinBox()
+        self.min_score_spin.setRange(-1.0, 1.0)
+        self.min_score_spin.setSingleStep(0.05)
+        self.min_score_spin.setDecimals(2)
+        self.min_score_spin.setValue(Config.MIN_SCORE_RETRIEVAL)
+        self.min_score_spin.setToolTip("Minimum similarity score for retrieved chunks (cosine). Use -1 to disable filtering; 0–0.3 typical.")
+        retrieval_layout.addRow("Min score (retrieval):", self.min_score_spin)
+        
+        self.rag_rerank_check = QCheckBox("Re-rank results for better relevance (keyword overlap)")
+        self.rag_rerank_check.setChecked(Config.RAG_RERANK)
+        retrieval_layout.addRow("", self.rag_rerank_check)
+        
+        self.rag_rerank_multiplier_spin = QSpinBox()
+        self.rag_rerank_multiplier_spin.setRange(2, 5)
+        self.rag_rerank_multiplier_spin.setValue(Config.RAG_RERANK_CANDIDATE_MULTIPLIER)
+        self.rag_rerank_multiplier_spin.setToolTip("Retrieve top_k × this many candidates, then re-rank to top_k (only when re-rank is on)")
+        retrieval_layout.addRow("Re-rank candidate multiplier:", self.rag_rerank_multiplier_spin)
         
         # LLM settings
         llm_group = QGroupBox("Language Model")
@@ -189,11 +207,20 @@ class SettingsDialog(QDialog):
         self.gpu_layers_spin.setValue(Config.LLM_N_GPU_LAYERS)
         llm_layout.addRow("GPU Layers:", self.gpu_layers_spin)
         
+        # Advanced LLM (prompt processing)
+        advanced_llm_group = QGroupBox("Advanced (LLM)")
+        advanced_llm_layout = QFormLayout(advanced_llm_group)
+        self.n_batch_spin = QSpinBox()
+        self.n_batch_spin.setRange(64, 2048)
+        self.n_batch_spin.setValue(Config.LLM_N_BATCH)
+        self.n_batch_spin.setToolTip(
+            "Prompt processing batch size. Higher values can speed up long prompts on capable hardware but use more memory. Default: 512."
+        )
+        advanced_llm_layout.addRow("Prompt batch size (n_batch):", self.n_batch_spin)
+        
         # Model paths
         paths_group = QGroupBox("Model Paths")
         paths_layout = QFormLayout(paths_group)
-        
-        # Model manager button
         manage_models_button = QPushButton("Manage Models...")
         manage_models_button.clicked.connect(self.open_model_manager)
         paths_layout.addRow("", manage_models_button)
@@ -209,15 +236,19 @@ class SettingsDialog(QDialog):
         
         self.embedding_model_edit = QLineEdit()
         self.embedding_model_edit.setText(Config.EMBEDDING_MODEL_NAME)
+        self.embedding_model_edit.setPlaceholderText("e.g. all-MiniLM-L6-v2, all-mpnet-base-v2")
         paths_layout.addRow("Embedding Model:", self.embedding_model_edit)
-        
-        # Add groups to layout
+        embedding_hint = QLabel(
+            "Changing the model requires re-processing documents (clear index and re-upload)."
+        )
+        embedding_hint.setStyleSheet("color: gray; font-size: 0.9em;")
+        embedding_hint.setWordWrap(True)
+        paths_layout.addRow("", embedding_hint)
         layout.addWidget(chunk_group)
         layout.addWidget(retrieval_group)
         layout.addWidget(llm_group)
+        layout.addWidget(advanced_llm_group)
         layout.addWidget(paths_group)
-        
-        # Buttons
         button_layout = QHBoxLayout()
         
         self.save_button = QPushButton("Save")
@@ -252,7 +283,6 @@ class SettingsDialog(QDialog):
         """Open the model manager dialog."""
         dialog = ModelManagerDialog(self)
         if dialog.exec() == QDialog.Accepted:
-            # Update the LLM path if a model was selected
             if hasattr(dialog, 'selected_model_path') and dialog.selected_model_path:
                 self.llm_path_edit.setText(dialog.selected_model_path)
     
@@ -263,10 +293,14 @@ class SettingsDialog(QDialog):
         self.chunk_size_spin.setValue(current_settings["chunk_size"])
         self.chunk_overlap_spin.setValue(current_settings["chunk_overlap"])
         self.top_k_spin.setValue(current_settings["top_k_retrieval"])
+        self.min_score_spin.setValue(current_settings.get("min_score_retrieval", 0.0))
+        self.rag_rerank_check.setChecked(current_settings.get("rag_rerank", False))
+        self.rag_rerank_multiplier_spin.setValue(current_settings.get("rag_rerank_candidate_multiplier", 3))
         self.max_tokens_spin.setValue(current_settings["llm_max_tokens"])
         self.temperature_spin.setValue(current_settings["llm_temperature"])
         self.top_p_spin.setValue(current_settings["llm_top_p"])
         self.gpu_layers_spin.setValue(current_settings["llm_n_gpu_layers"])
+        self.n_batch_spin.setValue(current_settings.get("llm_n_batch", 512))
         self.llm_path_edit.setText(current_settings["llm_model_path"])
         self.embedding_model_edit.setText(current_settings["embedding_model"])
     
@@ -276,10 +310,14 @@ class SettingsDialog(QDialog):
             "chunk_size": self.chunk_size_spin.value(),
             "chunk_overlap": self.chunk_overlap_spin.value(),
             "top_k_retrieval": self.top_k_spin.value(),
+            "min_score_retrieval": self.min_score_spin.value(),
+            "rag_rerank": self.rag_rerank_check.isChecked(),
+            "rag_rerank_candidate_multiplier": self.rag_rerank_multiplier_spin.value(),
             "llm_max_tokens": self.max_tokens_spin.value(),
             "llm_temperature": self.temperature_spin.value(),
             "llm_top_p": self.top_p_spin.value(),
             "llm_n_gpu_layers": self.gpu_layers_spin.value(),
+            "llm_n_batch": self.n_batch_spin.value(),
             "llm_model_path": self.llm_path_edit.text(),
             "embedding_model": self.embedding_model_edit.text()
         }
@@ -289,17 +327,18 @@ class SettingsDialog(QDialog):
     
     def reset_settings(self):
         """Reset to default settings."""
-        # Reset Config to defaults
         Config.reset_to_defaults()
-        
-        # Reload UI from Config
         self.chunk_size_spin.setValue(Config.CHUNK_SIZE)
         self.chunk_overlap_spin.setValue(Config.CHUNK_OVERLAP)
         self.top_k_spin.setValue(Config.TOP_K_RETRIEVAL)
+        self.min_score_spin.setValue(Config.MIN_SCORE_RETRIEVAL)
+        self.rag_rerank_check.setChecked(Config.RAG_RERANK)
+        self.rag_rerank_multiplier_spin.setValue(Config.RAG_RERANK_CANDIDATE_MULTIPLIER)
         self.max_tokens_spin.setValue(Config.LLM_MAX_TOKENS)
         self.temperature_spin.setValue(Config.LLM_TEMPERATURE)
         self.top_p_spin.setValue(Config.LLM_TOP_P)
         self.gpu_layers_spin.setValue(Config.LLM_N_GPU_LAYERS)
+        self.n_batch_spin.setValue(Config.LLM_N_BATCH)
         self.llm_path_edit.setText(str(Config.LLM_MODEL_PATH))
         self.embedding_model_edit.setText(Config.EMBEDDING_MODEL_NAME)
 
@@ -323,7 +362,6 @@ class ModelDownloadWorker(QObject):
             success = self.model_manager.download_model(self.model_id, progress_callback)
             
             if success:
-                # Get the model path that was just downloaded
                 model_path = self.model_manager.get_model_path(self.model_id)
                 self.signals.result.emit({
                     "success": True, 
@@ -360,8 +398,6 @@ class ModelManagerDialog(QDialog):
     def setup_ui(self):
         """Setup the model manager UI."""
         layout = QVBoxLayout(self)
-        
-        # Title
         title = QLabel("AI Model Manager")
         title.setFont(QFont("Arial", 14, QFont.Bold))
         layout.addWidget(title)
@@ -370,8 +406,6 @@ class ModelManagerDialog(QDialog):
         desc = QLabel("Download and manage AI models for the assistant. Models are stored in ~/.config/ai-offline-assistant/models/")
         desc.setWordWrap(True)
         layout.addWidget(desc)
-        
-        # Current model indicator
         current_model_group = QGroupBox("Current Model")
         current_model_layout = QVBoxLayout()
         
@@ -387,10 +421,8 @@ class ModelManagerDialog(QDialog):
         
         current_model_group.setLayout(current_model_layout)
         layout.addWidget(current_model_group)
-        
-        # Tabs for available and installed models
         tabs = QTabWidget()
-        
+
         # Available models tab
         available_tab = QWidget()
         available_layout = QVBoxLayout(available_tab)
@@ -402,14 +434,10 @@ class ModelManagerDialog(QDialog):
         self.available_list = QListWidget()
         self.available_list.itemSelectionChanged.connect(self.on_available_selection_changed)
         available_layout.addWidget(self.available_list)
-        
-        # Model details
         self.details_text = QTextEdit()
         self.details_text.setMaximumHeight(120)
         self.details_text.setReadOnly(True)
         available_layout.addWidget(self.details_text)
-        
-        # Download button
         download_layout = QHBoxLayout()
         self.download_button = QPushButton("Download Selected Model")
         self.download_button.clicked.connect(self.download_model)
@@ -419,7 +447,7 @@ class ModelManagerDialog(QDialog):
         available_layout.addLayout(download_layout)
         
         tabs.addTab(available_tab, "Available Models")
-        
+
         # Installed models tab
         installed_tab = QWidget()
         installed_layout = QVBoxLayout(installed_tab)
@@ -431,14 +459,10 @@ class ModelManagerDialog(QDialog):
         self.installed_list = QListWidget()
         self.installed_list.itemSelectionChanged.connect(self.on_installed_selection_changed)
         installed_layout.addWidget(self.installed_list)
-        
-        # Installed model info
         self.installed_info_text = QTextEdit()
         self.installed_info_text.setMaximumHeight(100)
         self.installed_info_text.setReadOnly(True)
         installed_layout.addWidget(self.installed_info_text)
-        
-        # Action buttons
         installed_actions_layout = QHBoxLayout()
         
         self.use_model_button = QPushButton("Use This Model")
@@ -457,17 +481,11 @@ class ModelManagerDialog(QDialog):
         tabs.addTab(installed_tab, "Installed Models")
         
         layout.addWidget(tabs)
-        
-        # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
-        
-        # Status label
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
-        
-        # Close button
         button_layout = QHBoxLayout()
         button_layout.addStretch()
         
@@ -516,7 +534,6 @@ class ModelManagerDialog(QDialog):
         if current_item and current_item.data(Qt.UserRole):
             model_info = current_item.data(Qt.UserRole)
             is_installed = self.model_manager.is_model_installed(model_info.id)
-            
             details = f"<b>{model_info.name}</b><br>"
             details += f"{model_info.description}<br><br>"
             details += f"<b>Size:</b> {model_info.size_gb:.1f} GB<br>"
@@ -535,8 +552,6 @@ class ModelManagerDialog(QDialog):
         current_item = self.installed_list.currentItem()
         if current_item and current_item.data(Qt.UserRole):
             model = current_item.data(Qt.UserRole)
-            
-            # Check if this is the currently active model
             current_model_name = Config.LLM_MODEL_PATH.name if Config.LLM_MODEL_PATH.exists() else None
             is_current = model['filename'] == current_model_name
             
@@ -551,8 +566,6 @@ class ModelManagerDialog(QDialog):
             
             self.installed_info_text.setHtml(info)
             self.delete_button.setEnabled(True)
-            
-            # Update button text based on whether it's current
             if is_current:
                 self.use_model_button.setText("Already Active")
                 self.use_model_button.setEnabled(False)
@@ -572,8 +585,6 @@ class ModelManagerDialog(QDialog):
             return
         
         model_info = current_item.data(Qt.UserRole)
-        
-        # Confirm download
         reply = QMessageBox.question(
             self,
             "Confirm Download",
@@ -584,21 +595,13 @@ class ModelManagerDialog(QDialog):
         
         if reply != QMessageBox.Yes:
             return
-        
-        # Start download
         self.download_button.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indeterminate
         self.status_label.setText(f"Downloading {model_info.name}...")
-        
-        # Create worker and thread
         self.download_worker = ModelDownloadWorker(self.model_manager, model_info.id)
         self.download_thread = QThread()
-        
-        # Move worker to thread
         self.download_worker.moveToThread(self.download_thread)
-        
-        # Connect signals
         self.download_thread.started.connect(self.download_worker.run)
         self.download_worker.signals.progress.connect(self.update_download_progress)
         self.download_worker.signals.error.connect(self.on_download_error)
@@ -606,8 +609,6 @@ class ModelManagerDialog(QDialog):
         self.download_worker.signals.finished.connect(self.download_thread.quit)
         self.download_worker.signals.finished.connect(self.download_worker.deleteLater)
         self.download_thread.finished.connect(self.download_thread.deleteLater)
-        
-        # Start download
         self.download_thread.start()
     
     def update_download_progress(self, message: str):
@@ -619,13 +620,9 @@ class ModelManagerDialog(QDialog):
         self.progress_bar.setVisible(False)
         self.status_label.setText(f"Model downloaded successfully!")
         self.download_button.setEnabled(True)
-        
-        # Set the selected model path so the main window can use it
         if result and 'model_path' in result:
             self.selected_model_path = result['model_path']
             logger.info(f"Model downloaded to: {self.selected_model_path}")
-        
-        # Refresh lists
         self.refresh_models()
         
         QMessageBox.information(
@@ -655,8 +652,6 @@ class ModelManagerDialog(QDialog):
             return
         
         model = current_item.data(Qt.UserRole)
-        
-        # Confirm deletion
         reply = QMessageBox.question(
             self,
             "Confirm Deletion",
@@ -683,10 +678,7 @@ class ModelManagerDialog(QDialog):
         current_item = self.installed_list.currentItem()
         if not current_item or not current_item.data(Qt.UserRole):
             return
-        
         model = current_item.data(Qt.UserRole)
-        
-        # Check if it's already the current model
         current_model_name = Config.LLM_MODEL_PATH.name if Config.LLM_MODEL_PATH.exists() else None
         if model['filename'] == current_model_name:
             QMessageBox.information(
@@ -697,8 +689,6 @@ class ModelManagerDialog(QDialog):
             return
         
         self.selected_model_path = model['path']
-        
-        # Update the current model label
         self.current_model_label.setText(f"Currently using: <b>{model['filename']}</b> (will load on close)")
         
         QMessageBox.information(
@@ -708,9 +698,6 @@ class ModelManagerDialog(QDialog):
             f"Close this window to load the model.\n"
             f"This may take 10-30 seconds depending on your system."
         )
-        
-        # Don't auto-close, let user close when ready
-        # self.accept()
 
 
 class DocumentListWidget(QListWidget):
@@ -728,8 +715,6 @@ class DocumentListWidget(QListWidget):
         
         for doc in documents:
             item = QListWidgetItem()
-            
-            # Format document info
             name = doc["file_name"]
             size_mb = doc["file_size"] / (1024 * 1024)
             chunks = doc["chunk_count"]
@@ -750,19 +735,13 @@ class MainWindow(QMainWindow):
         self.rag_pipeline = None
         self.current_query_thread = None
         self.current_processing_thread = None
-        
-        # Settings
         self.settings = QSettings("OfflineAIAssistant", "MainApp")
         
         self.setup_ui()
         self.setup_menu()
         self.setup_status_bar()
         self.load_window_settings()
-        
-        # Initialize RAG pipeline
         self.initialize_rag_pipeline()
-        
-        # Refresh document list
         self.refresh_documents()
     
     def setup_ui(self):
@@ -770,50 +749,30 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Offline AI Assistant")
         self.setMinimumSize(Config.WINDOW_MIN_WIDTH, Config.WINDOW_MIN_HEIGHT)
         self.resize(Config.WINDOW_WIDTH, Config.WINDOW_HEIGHT)
-        
-        # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        
-        # Main layout
         main_layout = QHBoxLayout(central_widget)
-        
-        # Create splitter
         splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(splitter)
-        
-        # Left panel - Documents
         left_panel = self.create_documents_panel()
         splitter.addWidget(left_panel)
-        
-        # Right panel - Chat
         right_panel = self.create_chat_panel()
         splitter.addWidget(right_panel)
-        
-        # Set splitter proportions
         splitter.setSizes([300, 900])
     
     def create_documents_panel(self) -> QWidget:
         """Create the documents panel."""
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        
-        # Title
         title = QLabel("Documents")
         title.setFont(QFont("Arial", 14, QFont.Bold))
         layout.addWidget(title)
-        
-        # Upload button
         self.upload_button = QPushButton("Upload Documents")
         self.upload_button.clicked.connect(self.upload_documents)
         layout.addWidget(self.upload_button)
-        
-        # Document list
         self.document_list = DocumentListWidget()
         self.document_list.itemSelectionChanged.connect(self.on_document_selected)
         layout.addWidget(self.document_list)
-        
-        # Document actions
         doc_actions_layout = QHBoxLayout()
         
         self.refresh_button = QPushButton("Refresh")
@@ -826,8 +785,6 @@ class MainWindow(QMainWindow):
         doc_actions_layout.addWidget(self.delete_button)
         
         layout.addLayout(doc_actions_layout)
-        
-        # Statistics
         self.stats_label = QLabel("No documents loaded")
         self.stats_label.setWordWrap(True)
         layout.addWidget(self.stats_label)
@@ -838,8 +795,6 @@ class MainWindow(QMainWindow):
         """Create the chat panel."""
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        
-        # Title and template selection
         header_layout = QHBoxLayout()
         
         title = QLabel("AI Assistant")
@@ -847,8 +802,6 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(title)
         
         header_layout.addStretch()
-        
-        # Template selection
         template_label = QLabel("Template:")
         header_layout.addWidget(template_label)
         
@@ -857,13 +810,9 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.template_combo)
         
         layout.addLayout(header_layout)
-        
-        # Chat display
         self.chat_display = QTextBrowser()
         self.chat_display.setFont(QFont("Consolas", 10))
         layout.addWidget(self.chat_display)
-        
-        # Sources panel
         sources_label = QLabel("Sources:")
         sources_label.setFont(QFont("Arial", 10, QFont.Bold))
         layout.addWidget(sources_label)
@@ -872,8 +821,6 @@ class MainWindow(QMainWindow):
         self.sources_display.setMaximumHeight(150)
         self.sources_display.setReadOnly(True)
         layout.addWidget(self.sources_display)
-        
-        # Query input
         query_layout = QHBoxLayout()
         
         self.query_input = QLineEdit()
@@ -890,8 +837,6 @@ class MainWindow(QMainWindow):
         query_layout.addWidget(self.clear_button)
         
         layout.addLayout(query_layout)
-        
-        # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
@@ -901,8 +846,6 @@ class MainWindow(QMainWindow):
     def setup_menu(self):
         """Setup the menu bar."""
         menubar = self.menuBar()
-        
-        # File menu
         file_menu = menubar.addMenu("File")
         
         upload_action = QAction("Upload Documents", self)
@@ -910,12 +853,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(upload_action)
         
         file_menu.addSeparator()
-        
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-        
-        # Edit menu
         edit_menu = menubar.addMenu("Edit")
         
         model_manager_action = QAction("Manage Models...", self)
@@ -923,7 +863,6 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(model_manager_action)
         
         edit_menu.addSeparator()
-        
         settings_action = QAction("Settings", self)
         settings_action.triggered.connect(self.show_settings)
         edit_menu.addAction(settings_action)
@@ -931,8 +870,6 @@ class MainWindow(QMainWindow):
         clear_action = QAction("Clear Chat", self)
         clear_action.triggered.connect(self.clear_chat)
         edit_menu.addAction(clear_action)
-        
-        # View menu
         view_menu = menubar.addMenu("View")
         
         refresh_action = QAction("Refresh Documents", self)
@@ -942,8 +879,6 @@ class MainWindow(QMainWindow):
         stats_action = QAction("Show Statistics", self)
         stats_action.triggered.connect(self.show_statistics)
         view_menu.addAction(stats_action)
-        
-        # Help menu
         help_menu = menubar.addMenu("Help")
         
         about_action = QAction("About", self)
@@ -954,8 +889,6 @@ class MainWindow(QMainWindow):
         """Setup the status bar."""
         self.status_bar = self.statusBar()
         self.status_bar.showMessage("Ready")
-        
-        # Add permanent widgets
         self.model_status_label = QLabel("Model: Not loaded")
         self.status_bar.addPermanentWidget(self.model_status_label)
     
@@ -963,8 +896,6 @@ class MainWindow(QMainWindow):
         """Initialize the RAG pipeline."""
         try:
             self.status_bar.showMessage("Initializing AI models...")
-            
-            # Check if model file exists
             model_path = Config.LLM_MODEL_PATH
             logger.info(f"Looking for LLM model at: {model_path}")
             
@@ -974,16 +905,11 @@ class MainWindow(QMainWindow):
                 self.model_status_label.setText("Model: Not found")
                 self.status_bar.showMessage("Model not found - Use Edit → Manage Models to download")
                 return
-            
             logger.info(f"Model file found: {model_path} ({model_path.stat().st_size / (1024**3):.2f} GB)")
-            
-            # Create RAG pipeline
             self.rag_pipeline = create_rag_pipeline(
                 model_path=model_path,
                 embedding_model=Config.EMBEDDING_MODEL_NAME
             )
-            
-            # Update model status
             if self.rag_pipeline.llm and self.rag_pipeline.llm.is_loaded():
                 model_name = self.rag_pipeline.llm.model_path.name
                 self.model_status_label.setText(f"Model: {model_name}")
@@ -994,19 +920,57 @@ class MainWindow(QMainWindow):
                 self.model_status_label.setText("Model: Load failed")
                 self.status_bar.showMessage("Model load failed")
                 return
-            
+            self._check_embedding_model_mismatch()
+
             self.status_bar.showMessage("Ready")
-            
+
         except Exception as e:
             logger.error(f"Error initializing RAG pipeline: {e}")
             import traceback
             logger.error(traceback.format_exc())
             self.show_error("Initialization Error", f"Failed to initialize AI models:\n\n{str(e)}\n\nCheck the logs for more details.")
             self.model_status_label.setText("Model: Error")
-    
+
+    def _check_embedding_model_mismatch(self) -> None:
+        """If the index was built with a different embedding model (or dimension), warn and offer to clear and re-index."""
+        if not self.rag_pipeline or not self.rag_pipeline.vector_store:
+            return
+        vs = self.rag_pipeline.vector_store
+        stats = vs.get_stats()
+        if stats["documents"] == 0 and stats["vectors_in_index"] == 0:
+            return
+        index_model = vs.get_index_embedding_model()
+        config_model = Config.EMBEDDING_MODEL_NAME
+        embedder_dim = self.rag_pipeline.embedder.embedding_dim
+        index_dim = vs.embedding_dim
+        if index_model == config_model and index_dim == embedder_dim:
+            return
+        index_label = index_model or f"(dimension {index_dim})"
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Embedding model mismatch")
+        msg.setIcon(QMessageBox.Warning)
+        msg.setText(
+            "The document index was built with a different embedding model than the one currently configured."
+        )
+        msg.setInformativeText(
+            f"Index was built with: {index_label}\n"
+            f"Configured model: {config_model} (dimension {embedder_dim})\n\n"
+            "Retrieval may be incorrect. Clear the index and re-upload your documents to use the new model."
+        )
+        clear_btn = msg.addButton("Clear index and re-index", QMessageBox.ActionRole)
+        continue_btn = msg.addButton("Continue anyway", QMessageBox.AcceptRole)
+        msg.exec()
+        if msg.clickedButton() == clear_btn:
+            try:
+                vs.clear_all_documents(embedder_dim)
+                self.refresh_documents()
+                self.status_bar.showMessage("Index cleared. Re-upload documents to use the new embedding model.")
+            except Exception as e:
+                logger.error("Failed to clear index: %s", e)
+                self.show_error("Error", f"Failed to clear index: {e}")
+
     def upload_documents(self):
         """Upload documents for processing."""
-        # Open file dialog in user's home directory
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Select Documents to Upload",
@@ -1016,20 +980,14 @@ class MainWindow(QMainWindow):
         
         if not file_paths:
             return
-        
         if not self.rag_pipeline:
             self.show_error("Error", "RAG pipeline not initialized")
             return
-        
-        # Convert to Path objects
         paths = [Path(p) for p in file_paths]
-        
-        # Start processing in background thread
         self.start_document_processing(paths)
     
     def start_document_processing(self, file_paths: List[Path]):
         """Start document processing in background thread."""
-        # Check if thread exists and is running
         try:
             if (self.current_processing_thread and 
                 hasattr(self.current_processing_thread, 'isRunning') and 
@@ -1037,22 +995,13 @@ class MainWindow(QMainWindow):
                 self.show_error("Error", "Document processing already in progress")
                 return
         except RuntimeError:
-            # Thread object was deleted, reset it
             self.current_processing_thread = None
-        
-        # Setup progress
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indeterminate
         self.upload_button.setEnabled(False)
-        
-        # Create worker and thread
         self.processing_worker = DocumentProcessor(self.rag_pipeline, file_paths)
         self.current_processing_thread = QThread()
-        
-        # Move worker to thread
         self.processing_worker.moveToThread(self.current_processing_thread)
-        
-        # Connect signals
         self.current_processing_thread.started.connect(self.processing_worker.run)
         self.processing_worker.signals.progress.connect(self.update_progress)
         self.processing_worker.signals.error.connect(self.show_processing_error)
@@ -1061,8 +1010,6 @@ class MainWindow(QMainWindow):
         self.processing_worker.signals.finished.connect(self.processing_worker.deleteLater)
         self.current_processing_thread.finished.connect(self._on_processing_thread_finished)
         self.current_processing_thread.finished.connect(self.current_processing_thread.deleteLater)
-        
-        # Start thread
         self.current_processing_thread.start()
     
     def update_progress(self, message: str):
@@ -1077,8 +1024,6 @@ class MainWindow(QMainWindow):
         """Handle processing completion."""
         self.progress_bar.setVisible(False)
         self.upload_button.setEnabled(True)
-        
-        # Show results
         success_count = sum(1 for r in results if r.success)
         total_count = len(results)
         
@@ -1087,21 +1032,16 @@ class MainWindow(QMainWindow):
         else:
             failed_count = total_count - success_count
             self.status_bar.showMessage(f"Processed {success_count}/{total_count} documents ({failed_count} failed)")
-            
-            # Show detailed error information
             failed_files = [r.file_path for r in results if not r.success]
             if failed_files:
                 error_msg = f"Failed to process:\n" + "\n".join([Path(f).name for f in failed_files[:5]])
                 if len(failed_files) > 5:
                     error_msg += f"\n... and {len(failed_files) - 5} more files"
                 self.show_error("Processing Errors", error_msg)
-        
-        # Refresh document list
         self.refresh_documents()
     
     def _on_processing_thread_finished(self):
         """Handle processing thread finished signal."""
-        # Clean up thread reference with a small delay to ensure proper cleanup
         QTimer.singleShot(100, self._clear_processing_thread_reference)
     
     def _clear_processing_thread_reference(self):
@@ -1121,19 +1061,12 @@ class MainWindow(QMainWindow):
         if not self.rag_pipeline.llm or not self.rag_pipeline.llm.is_loaded():
             self.show_error("Error", "Language model not loaded")
             return
-        
-        # Add query to chat
         self.add_to_chat(f"**You:** {query}", is_user=True)
-        
-        # Clear input
         self.query_input.clear()
-        
-        # Start query processing
         self.start_query_processing(query)
     
     def start_query_processing(self, query: str):
         """Start query processing in background thread."""
-        # Check if thread exists and is running
         try:
             if (self.current_query_thread and 
                 hasattr(self.current_query_thread, 'isRunning') and 
@@ -1141,24 +1074,13 @@ class MainWindow(QMainWindow):
                 self.show_error("Error", "Query processing already in progress")
                 return
         except RuntimeError:
-            # Thread object was deleted, reset it
             self.current_query_thread = None
-        
-        # Disable input
         self.send_button.setEnabled(False)
         self.query_input.setEnabled(False)
-        
-        # Get selected template
         template = self.template_combo.currentText()
-        
-        # Create worker and thread
         self.query_worker = QueryProcessor(self.rag_pipeline, query, template, streaming=True)
         self.current_query_thread = QThread()
-        
-        # Move worker to thread
         self.query_worker.moveToThread(self.current_query_thread)
-        
-        # Connect signals
         self.current_query_thread.started.connect(self.query_worker.run)
         self.query_worker.signals.stream_token.connect(self.on_stream_token)
         self.query_worker.signals.stream_sources.connect(self.on_stream_sources)
@@ -1169,11 +1091,7 @@ class MainWindow(QMainWindow):
         self.query_worker.signals.finished.connect(self.query_worker.deleteLater)
         self.current_query_thread.finished.connect(self._on_query_thread_finished)
         self.current_query_thread.finished.connect(self.current_query_thread.deleteLater)
-        
-        # Start thread
         self.current_query_thread.start()
-        
-        # Add assistant response placeholder
         self.add_to_chat("**Assistant:** ", is_user=False)
         self.current_response_start = self.chat_display.textCursor().position()
     
@@ -1196,11 +1114,8 @@ class MainWindow(QMainWindow):
     
     def on_stream_final(self, result: Dict[str, Any]):
         """Handle final streaming result."""
-        # Add timing information
         cursor = self.chat_display.textCursor()
         cursor.movePosition(QTextCursor.End)
-        
-        # Build timing info string with safe key access
         total_time = result.get('total_time', 0.0)
         tokens_generated = result.get('tokens_generated', 0)
         chunks_retrieved = result.get('chunks_retrieved', 0)
@@ -1231,7 +1146,6 @@ class MainWindow(QMainWindow):
     
     def _on_query_thread_finished(self):
         """Handle query thread finished signal."""
-        # Clean up thread reference with a small delay to ensure proper cleanup
         QTimer.singleShot(100, self._clear_query_thread_reference)
     
     def _clear_query_thread_reference(self):
@@ -1239,14 +1153,22 @@ class MainWindow(QMainWindow):
         self.current_query_thread = None
     
     def add_to_chat(self, message: str, is_user: bool = False):
-        """Add message to chat display."""
+        """Add message to chat display. Renders **Label:** as bold via HTML."""
         cursor = self.chat_display.textCursor()
         cursor.movePosition(QTextCursor.End)
-        
         if cursor.position() > 0:
-            cursor.insertText("\n\n")
-        
-        cursor.insertText(message)
+            cursor.insertHtml("<br><br>")
+        if message.startswith("**You:** "):
+            cursor.insertHtml("<b>You:</b> " + html.escape(message[9:]))
+        elif message.startswith("**Assistant:** "):
+            cursor.insertHtml("<b>Assistant:</b> " + html.escape(message[15:]))
+        elif message == "**Assistant:** " or message.startswith("**Assistant:**"):
+            suffix = message[14:] if message.startswith("**Assistant:**") else ""
+            cursor.insertHtml("<b>Assistant:</b> " + html.escape(suffix))
+        elif message.startswith("**Error:** "):
+            cursor.insertHtml("<b>Error:</b> " + html.escape(message[10:]))
+        else:
+            cursor.insertHtml(html.escape(message))
         self.chat_display.setTextCursor(cursor)
         self.chat_display.ensureCursorVisible()
     
@@ -1263,8 +1185,6 @@ class MainWindow(QMainWindow):
         try:
             documents = self.rag_pipeline.list_documents()
             self.document_list.update_documents(documents)
-            
-            # Update statistics
             total_docs = len(documents)
             total_chunks = sum(doc["chunk_count"] for doc in documents)
             
@@ -1290,8 +1210,6 @@ class MainWindow(QMainWindow):
         
         document_id = current_item.data(Qt.UserRole)
         document_name = current_item.text()
-        
-        # Confirm deletion
         reply = QMessageBox.question(
             self,
             "Confirm Deletion",
@@ -1316,7 +1234,6 @@ class MainWindow(QMainWindow):
         """Show settings dialog."""
         dialog = SettingsDialog(self)
         if dialog.exec() == QDialog.Accepted:
-            # Reinitialize pipeline with new settings
             self.initialize_rag_pipeline()
             self.status_bar.showMessage("Settings updated")
     
@@ -1324,14 +1241,9 @@ class MainWindow(QMainWindow):
         """Show model manager dialog."""
         dialog = ModelManagerDialog(self)
         dialog.exec()
-        
-        # After dialog closes, check if a model was downloaded or selected
         if hasattr(dialog, 'selected_model_path') and dialog.selected_model_path:
             logger.info(f"Model downloaded/selected: {dialog.selected_model_path}")
-            # Update the config with the new model path
             Config.LLM_MODEL_PATH = Path(dialog.selected_model_path)
-            
-            # Show progress dialog while loading model
             progress = QProgressDialog(self)
             progress.setWindowTitle("Loading Model")
             progress.setWindowModality(Qt.WindowModal)
@@ -1341,28 +1253,17 @@ class MainWindow(QMainWindow):
             progress.setValue(0)
             progress.setLabelText("Step 1/4: Verifying model file...")
             progress.show()
-            QApplication.processEvents()  # Force UI update
-            
-            # Reinitialize the RAG pipeline with the new model
+            QApplication.processEvents()
             try:
-                # Step 1: Verify model exists
                 progress.setLabelText("Step 1/4: Verifying model file...")
                 QApplication.processEvents()
-                
-                # Step 2: Load embedding model
                 progress.setValue(1)
                 progress.setLabelText("Step 2/4: Loading embedding model...")
                 QApplication.processEvents()
-                
-                # Step 3: Load LLM model (this is the slow part)
                 progress.setValue(2)
                 progress.setLabelText("Step 3/4: Loading LLM model (this may take 10-30s)...")
                 QApplication.processEvents()
-                
-                # Actually initialize
                 self.initialize_rag_pipeline()
-                
-                # Step 4: Complete
                 progress.setValue(3)
                 progress.setLabelText("Step 4/4: Finalizing...")
                 QApplication.processEvents()
@@ -1472,26 +1373,18 @@ Embedder:
     
     def closeEvent(self, event):
         """Handle close event."""
-        # Save settings
         self.save_window_settings()
-        
-        # Stop any running threads properly
         self._cleanup_threads()
-        
-        # Close RAG pipeline and cleanup resources
         if self.rag_pipeline:
             try:
                 # Force cleanup of sentence-transformers resources
                 if hasattr(self.rag_pipeline.embedder, 'model') and self.rag_pipeline.embedder.model:
-                    # Clear the model to free up resources
                     del self.rag_pipeline.embedder.model
                     self.rag_pipeline.embedder.model = None
                 
                 self.rag_pipeline.close()
             except Exception as e:
                 logger.error(f"Error during RAG pipeline cleanup: {e}")
-        
-        # Force garbage collection
         import gc
         gc.collect()
         
@@ -1500,8 +1393,6 @@ Embedder:
     def _cleanup_threads(self):
         """Properly cleanup all running threads."""
         threads_to_cleanup = []
-        
-        # Collect threads that need cleanup
         if self.current_query_thread:
             try:
                 if hasattr(self.current_query_thread, 'isRunning') and self.current_query_thread.isRunning():
@@ -1515,17 +1406,11 @@ Embedder:
                     threads_to_cleanup.append(('processing', self.current_processing_thread))
             except RuntimeError:
                 pass
-        
-        # Stop threads gracefully
         for thread_name, thread in threads_to_cleanup:
             try:
                 logger.info(f"Stopping {thread_name} thread...")
-                
-                # First, try to quit gracefully
                 thread.quit()
-                
-                # Wait for thread to finish with longer timeout
-                if not thread.wait(5000):  # Wait up to 5 seconds
+                if not thread.wait(5000):
                     logger.warning(f"{thread_name} thread did not stop gracefully, terminating...")
                     thread.terminate()
                     if not thread.wait(2000):  # Wait up to 2 seconds for termination
@@ -1534,75 +1419,49 @@ Embedder:
                         logger.info(f"{thread_name} thread terminated")
                 else:
                     logger.info(f"{thread_name} thread stopped gracefully")
-                
             except Exception as e:
                 logger.error(f"Error stopping {thread_name} thread: {e}")
-        
-        # Process any pending events to ensure cleanup signals are handled
         from PySide6.QtWidgets import QApplication
         app = QApplication.instance()
         if app:
             app.processEvents()
-        
-        # Clear thread references
         self.current_query_thread = None
         self.current_processing_thread = None
 
 
 def main():
     """Main application entry point."""
-    # Setup logging
     logger = setup_logging()
     logger.info("Starting Offline AI Assistant")
-    
-    # Ensure directories exist
     Config.ensure_directories()
-    
-    # Load saved configuration (if exists)
     Config.load_config()
-    
-    # Create application
     app = QApplication(sys.argv)
     app.setApplicationName("Offline AI Assistant")
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("OfflineAIAssistant")
-    
-    # Set application properties for better resource management
     app.setAttribute(Qt.AA_DontCreateNativeWidgetSiblings, True)
-    
     window = None
     try:
-        # Create main window
         window = MainWindow()
         window.show()
-        
-        # Run application
         exit_code = app.exec()
-        
-        # Ensure proper cleanup
         if window:
             window._cleanup_threads()
         
         logger.info("Application shutting down")
         sys.exit(exit_code)
-        
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         logger.error(traceback.format_exc())
-        
-        # Cleanup on error
         if window:
             try:
                 window._cleanup_threads()
             except:
                 pass
-        
-        # Show error dialog
         error_msg = f"A fatal error occurred:\n\n{str(e)}\n\nCheck the logs for more details."
         QMessageBox.critical(None, "Fatal Error", error_msg)
         sys.exit(1)
     finally:
-        # Final cleanup
         try:
             app.quit()
         except:
